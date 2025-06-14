@@ -1,7 +1,0 @@
-__pycache__/
-venv/
-.env/
-*.sqlite*
-*.log
-*.pyc
-model.pkl
