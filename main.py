@@ -1,20 +1,21 @@
-
+import os
 import time
 from datetime import datetime, timedelta
 from selenium import webdriver
 from selenium.webdriver.chrome.options import Options
 from selenium.webdriver.common.by import By
 import requests
+import statistics
 
-# Configurações do Telegram
-TELEGRAM_TOKEN = "7239698274:AAFyg7HWLPvXceJYDope17DkfJpxtU4IU2Y"
-CHAT_ID = "6821521589"
+TELEGRAM_TOKEN = os.getenv("TELEGRAM_TOKEN")
+CHAT_ID = os.getenv("CHAT_ID")
 
-# URLs e ativos
+if not TELEGRAM_TOKEN or not CHAT_ID:
+    raise Exception("Informe TELEGRAM_TOKEN e CHAT_ID nas variáveis de ambiente")
+
 URL = "https://stockity.id/trading"
 ATIVOS = ["Altcoin IDX", "Cripto IDX"]
 
-# Função para enviar mensagem no telegram
 def send_telegram_message(text):
     url = f"https://api.telegram.org/bot{TELEGRAM_TOKEN}/sendMessage"
     data = {"chat_id": CHAT_ID, "text": text}
@@ -23,37 +24,46 @@ def send_telegram_message(text):
     except Exception as e:
         print(f"Erro ao enviar mensagem Telegram: {e}")
 
-# Função para extrair dados das velas (simplificado)
 def pegar_dados_ativos(driver):
     dados = {}
     for ativo in ATIVOS:
         try:
-            # Procurar pelo painel do ativo
             painel = driver.find_element(By.XPATH, f'//div[contains(text(),"{ativo}")]/ancestor::div[contains(@class,"card")]')
-            # Aqui você ajustaria o seletor correto para pegar o preço ou vela
-            # Exemplo fictício (ajustar conforme HTML da página):
-            velas = painel.find_elements(By.CSS_SELECTOR, ".candle") # exemplo fictício
-            # Pegar últimos preços de fechamento (simulação)
-            if len(velas) >= 2:
-                fechamento_ultimo = float(velas[-1].get_attribute("data-close"))
-                fechamento_anterior = float(velas[-2].get_attribute("data-close"))
-                dados[ativo] = (fechamento_anterior, fechamento_ultimo)
-            else:
+            velas = painel.find_elements(By.CSS_SELECTOR, ".candle")  # Seletor de velas
+            fechamentos = []
+            for v in velas[-5:]:
+                close = v.get_attribute("data-close")
+                if close:
+                    fechamentos.append(float(close))
+            if len(fechamentos) < 5:
                 dados[ativo] = None
+            else:
+                dados[ativo] = fechamentos
         except Exception as e:
-            dados[ativo] = None
             print(f"Erro ao pegar dados de {ativo}: {e}")
+            dados[ativo] = None
     return dados
 
-# Função simples para definir sinal compra ou venda
-def analisar_sinal(fechamento_anterior, fechamento_ultimo):
-    if fechamento_ultimo > fechamento_anterior:
+def analisar_sinal(fechamentos):
+    ultimos_3 = fechamentos[-3:]
+    anteriores_2 = fechamentos[-5:-3]
+    media_ultimos_3 = statistics.mean(ultimos_3)
+    media_anteriores_2 = statistics.mean(anteriores_2)
+    volatilidade = statistics.stdev(fechamentos)
+
+    VOLATILIDADE_MIN = 0.0005
+
+    if volatilidade < VOLATILIDADE_MIN:
+        return None
+
+    if media_ultimos_3 > media_anteriores_2:
         return "COMPRA"
-    else:
+    elif media_ultimos_3 < media_anteriores_2:
         return "VENDA"
+    else:
+        return None
 
 def main():
-    # Configurar Selenium para rodar headless
     options = Options()
     options.add_argument("--headless")
     options.add_argument("--no-sandbox")
@@ -61,52 +71,57 @@ def main():
 
     driver = webdriver.Chrome(options=options)
     driver.get(URL)
-    time.sleep(15)  # esperar a página carregar e autenticar se necessário
-
+    time.sleep(15)  # espera a página carregar
+    
     print("Bot iniciado e acessando Stockity...")
+
+    ultimo_envio = datetime.min
 
     while True:
         try:
-            now = datetime.utcnow() + timedelta(hours=-3)  # Ajuste para horário Brasília (-3h UTC)
-            seg_ate_minuto = 60 - now.second
+            agora = datetime.utcnow() + timedelta(hours=-3)  # horário de Brasília
+            segundos_ate_minuto = 60 - agora.second
 
-            # Esperar até 5 segundos antes da próxima vela começar
-            if seg_ate_minuto > 5:
-                time.sleep(seg_ate_minuto - 5)
+            if segundos_ate_minuto > 5:
+                time.sleep(segundos_ate_minuto - 5)
             else:
-                time.sleep(seg_ate_minuto + 55)  # caso tenha passado dos 5 seg
+                time.sleep(segundos_ate_minuto + 55)
 
-            # Atualizar dados ativos
+            agora = datetime.utcnow() + timedelta(hours=-3)
+            minuto_corrente = agora.replace(second=0, microsecond=0)
+
+            if (agora - ultimo_envio).total_seconds() < 120:
+                continue
+
             driver.refresh()
-            time.sleep(10)  # esperar atualizar
+            time.sleep(10)
 
             dados = pegar_dados_ativos(driver)
             sinais = {}
-            for ativo, valores in dados.items():
-                if valores is not None:
-                    fechamento_anterior, fechamento_ultimo = valores
-                    sinal = analisar_sinal(fechamento_anterior, fechamento_ultimo)
+            for ativo, fechamentos in dados.items():
+                if fechamentos:
+                    sinal = analisar_sinal(fechamentos)
                     sinais[ativo] = sinal
                 else:
                     sinais[ativo] = None
 
-            # Escolher o ativo com sinal mais "forte" (simples, aqui escolhemos o ativo que teve maior diferença)
             ativo_selecionado = None
-            maior_dif = 0
-            for ativo, valores in dados.items():
-                if valores is not None:
-                    diff = abs(valores[1] - valores[0])
-                    if diff > maior_dif:
-                        maior_dif = diff
+            maior_volatilidade = 0
+            for ativo, fechamentos in dados.items():
+                if fechamentos and sinais[ativo]:
+                    vol = statistics.stdev(fechamentos)
+                    if vol > maior_volatilidade:
+                        maior_volatilidade = vol
                         ativo_selecionado = ativo
 
             if ativo_selecionado and sinais[ativo_selecionado]:
-                horario_operacao = (datetime.utcnow() + timedelta(hours=-3) + timedelta(minutes=1)).strftime("%H:%M")
+                horario_operacao = (minuto_corrente + timedelta(minutes=1)).strftime("%H:%M")
                 mensagem = f"Sinal para {ativo_selecionado}: {sinais[ativo_selecionado]} às {horario_operacao}"
                 print(mensagem)
                 send_telegram_message(mensagem)
+                ultimo_envio = agora
             else:
-                print("Sem dados suficientes para sinal.")
+                print(f"{agora.strftime('%H:%M:%S')} - Sem sinal confiável.")
 
         except Exception as e:
             print(f"Erro no loop principal: {e}")
@@ -114,3 +129,4 @@ def main():
 
 if __name__ == "__main__":
     main()
+    
