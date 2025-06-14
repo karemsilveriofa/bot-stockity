@@ -1,0 +1,7 @@
+playwright
+selenium
+chromedriver-binary
+scikit-learn
+pandas
+numpy
+ requests
